@@ -4,6 +4,11 @@ import Course from "./models/Course.js";
 import Student from "./models/Student.js";
 import mongoose from "mongoose";
 import Enrollment from "./models/Enrollment.js";
+import User from "./models/User.js";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+
+const JWT_SECRET = "my-top-secret";
 
 const typeDefs = gql`
   type Student {
@@ -61,7 +66,18 @@ const typeDefs = gql`
     credits: Int
     instructor: String
   }
-
+  input createUserInput {
+    email: String!
+    password: String!
+  }
+  type User {
+    id: ID!
+    email: String!
+  }
+  type AuthPayload {
+    token: String!
+    user: User!
+  }
   type Mutation {
     createStudent(input: CreateStudentInput!): Student!
     deleteStudent(id: ID!): Student
@@ -71,7 +87,11 @@ const typeDefs = gql`
     deleteCourse(id: ID!): Course!
     updateCourse(id: ID!, input: UpdateCourseInput!): Course!
 
-    enrollStudent(studentId: ID!, courseId: ID!): Enrollment!
+    enrollStudent(studentId: ID!, courseId: ID!): Student!
+    unenrollStudent(studentId: ID!, courseId: ID!): Student!
+
+    signup(input: createUserInput!): AuthPayload!
+    login(email: String!, password: String!): AuthPayload
   }
 `;
 const resolvers = {
@@ -106,8 +126,53 @@ const resolvers = {
   },
 
   Mutation: {
+    //create user
+    signup: async (_, { input: { email, password } }) => {
+      //? 1)make sure email is not exists
+      const userExists = await User.findOne({ email: email });
+      if (userExists) throw new Error("Email already exists");
+
+      //? 2)hash the password
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      //? 3)create user
+      try {
+        const user = await User.create({ email, password: hashedPassword });
+
+        //? 4)create jwt toke
+        const token = jwt.sign({ email }, JWT_SECRET, { expiresIn: "7d" });
+        return {
+          token: token,
+          user,
+        };
+      } catch (err) {
+        throw new Error("Failed to create user");
+      }
+    },
+    //login
+    login: async (_, { email, password }) => {
+      //? 1)make sure email exists
+      const user = await User.findOne({ email: email });
+      if (!user) throw new Error("Email doesn't exists");
+
+      //? 2)compare password
+      const isPasswordMatched = await bcrypt.compare(password, user.password);
+      if (!isPasswordMatched) throw new Error("Password is not correct");
+
+      try {
+        //? 4)create jwt toke
+        const token = jwt.sign({ email }, JWT_SECRET, { expiresIn: "7d" });
+        return {
+          token: token,
+          user,
+        };
+      } catch (err) {
+        throw new Error("Failed to create user");
+      }
+    },
     //create student
-    createStudent: async (_, { input }) => {
+    createStudent: async (_, { input }, { user }) => {
+      if (!user) throw new Error("UNAUTHENTICATED");
       try {
         const student = await Student.create(input);
         return student;
@@ -117,7 +182,8 @@ const resolvers = {
       }
     },
     //delete student
-    deleteStudent: async (_, { id }) => {
+    deleteStudent: async (_, { id }, { user }) => {
+      if (!user) throw new Error("UNAUTHENTICATED");
       try {
         const student = await Student.findOneAndDelete({ _id: id });
         return student;
@@ -127,7 +193,8 @@ const resolvers = {
       }
     },
     //update Students
-    updateStudent: async (_, { id, input }) => {
+    updateStudent: async (_, { id, input }, { user }) => {
+      if (!user) throw new Error("UNAUTHENTICATED");
       const { name, email, major, age } = input;
       let student = await Student.findOneAndUpdate(
         { _id: id },
@@ -141,7 +208,8 @@ const resolvers = {
     },
 
     //create course
-    createCourse: async (_, { input }) => {
+    createCourse: async (_, { input }, { user }) => {
+      if (!user) throw new Error("UNAUTHENTICATED");
       try {
         const course = await Course.create(input);
         return course;
@@ -151,7 +219,8 @@ const resolvers = {
       }
     },
     //delete course
-    deleteCourse: async (_, { id }) => {
+    deleteCourse: async (_, { id }, { user }) => {
+      if (!user) throw new Error("UNAUTHENTICATED");
       try {
         const course = await Course.findOneAndDelete({ _id: id });
         return course;
@@ -161,7 +230,8 @@ const resolvers = {
       }
     },
     //update course
-    updateCourse: async (_, { id, input }) => {
+    updateCourse: async (_, { id, input }, { user }) => {
+      if (!user) throw new Error("UNAUTHENTICATED");
       const { title, code, credits, instructor } = input;
       let course = await Course.findOneAndUpdate(
         { _id: id },
@@ -174,13 +244,50 @@ const resolvers = {
       return course;
     },
     //enroll student
-    enrollStudent: async (_, { studentId, courseId }) => {
+    enrollStudent: async (_, { studentId, courseId }, { user }) => {
+      if (!user) throw new Error("UNAUTHENTICATED");
+
+      const student = await Student.findById(studentId);
+      if (!student) throw new Error("Student not found");
+      const course = await Course.findById(courseId);
+      if (!course) throw new Error("Course not found");
+
+      const existing = await Enrollment.findOne({ studentId, courseId });
+      if (existing) return student;
+
       try {
-        const enrollment = await Enrollment.create({ studentId, courseId });
-        return enrollment;
+        await Enrollment.create({ studentId, courseId });
+        if (!student.courses.includes(courseId)) {
+          student.courses.push(courseId);
+          await student.save();
+        }
+        return student;
       } catch (err) {
-        console.log(err);
         throw new Error("Failed to create enrollment");
+      }
+    },
+    //unenroll student
+    unenrollStudent: async (_, { studentId, courseId }, { user }) => {
+      if (!user) throw new Error("UNAUTHENTICATED");
+
+      const student = await Student.findById(studentId);
+      if (!student) throw new Error("Student not found");
+
+      const course = await Course.findById(courseId);
+      if (!course) throw new Error("Course not found");
+
+      const existing = await Enrollment.findOne({ studentId, courseId });
+      if (!existing) throw new Error("Student not enrolled in this course");
+
+      try {
+        await Enrollment.deleteOne({ studentId, courseId });
+        student.courses = student.courses.filter(
+          (id) => id.toString() !== courseId
+        );
+        await student.save();
+        return student;
+      } catch (err) {
+        throw new Error("Failed to delete enrollment");
       }
     },
   },
@@ -188,10 +295,7 @@ const resolvers = {
   //Implement Nested Resolvers
   Student: {
     courses: async (parent) => {
-      const enrollments = await Enrollment.find({
-        studentId: parent._id,
-      }).populate("courseId");
-      return enrollments.map((e) => e.courseId);
+      return await Course.find({ _id: { $in: parent.courses } });
     },
   },
 
@@ -206,12 +310,31 @@ const resolvers = {
   },
 };
 
+const verifyToken = (token) => {
+  if (!token) return null;
+  //Bearer token
+  const [schema, newToken] = token.split(" ");
+  if (!newToken) return null;
+  try {
+    return jwt.verify(newToken, JWT_SECRET);
+  } catch {
+    return null;
+  }
+};
+
 async function start() {
   const app = express();
   //graphql & apollo
   const server = new ApolloServer({
     typeDefs,
     resolvers,
+    context: async ({ req }) => {
+      const token = req.headers.authorization;
+      const decodedToken = verifyToken(token);
+      if (!decodedToken) return { user: null };
+      const user = await User.findOne({ email: decodedToken.email });
+      return { user };
+    },
   });
   await server.start();
   server.applyMiddleware({ app, path: "/graphql" });
