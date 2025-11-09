@@ -14,7 +14,6 @@ const studentSchema = new Schema({
   },
   age: { type: Number, required: true },
   major: { type: String, required: true },
-  courses: [{ type: mongoose.Schema.Types.ObjectId, ref: "Course" }],
 });
 const Student = mongoose.model("Student", studentSchema);
 
